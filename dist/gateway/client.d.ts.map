@@ -1,0 +1,1 @@
+{"version":3,"file":"client.d.ts","sourceRoot":"","sources":["../../src/gateway/client.ts"],"names":[],"mappings":"AA4EA,wBAAgB,eAAe;;;;;UAlDE,MAAM;YAAU,MAAM;eAAa,MAAM;gBAAc,MAAM;gBAAc,MAAM,GAAG,IAAI;EA0DxH;AAED,wBAAgB,oBAAoB;;;;;;;;;;;;;;;;;;;;EAiBnC;AAED,wBAAsB,gBAAgB,kBAyBrC"}

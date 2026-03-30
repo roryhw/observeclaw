@@ -1,6 +1,5 @@
 node_modules/
-dist/
-# ui/dist/ is tracked — needed for npm git installs
+# dist/ and ui/dist/ are tracked — needed for npm git installs (consumers don't have tsc)
 ui/node_modules/
 *.db
 *.db-journal
