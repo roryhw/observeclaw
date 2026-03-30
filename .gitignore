@@ -14,8 +14,11 @@ src/**/*.js
 src/**/*.js.map
 src/**/*.d.ts
 src/**/*.d.ts.map
-ui/**/*.js
-ui/**/*.js.map
-ui/**/*.d.ts
-ui/**/*.d.ts.map
-!ui/vite.config.*
+ui/src/**/*.js
+ui/src/**/*.js.map
+ui/src/**/*.d.ts
+ui/src/**/*.d.ts.map
+ui/vite.config.js
+ui/vite.config.js.map
+ui/vite.config.d.ts
+ui/vite.config.d.ts.map
