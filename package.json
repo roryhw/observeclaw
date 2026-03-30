@@ -1,0 +1,58 @@
+{
+  "name": "observeclaw",
+  "version": "1.0.0",
+  "description": "System observability dashboard for OpenClaw",
+  "type": "module",
+  "bin": {
+    "observeclaw": "./bin/observeclaw.js"
+  },
+  "main": "dist/server.js",
+  "files": [
+    "bin/",
+    "dist/",
+    "ui/dist/",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "npm run build:server && npm run build:ui",
+    "build:server": "tsc -p tsconfig.json",
+    "build:ui": "cd ui && npm run build",
+    "start": "node dist/server.js",
+    "dev": "tsx src/server.ts",
+    "prepack": "npm run build",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [
+    "openclaw",
+    "observability",
+    "dashboard",
+    "monitoring"
+  ],
+  "author": "Rory Headon-Weeks",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/roryhw/observeclaw.git"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "@fastify/cors": "^11.2.0",
+    "@fastify/static": "^9.0.0",
+    "@fastify/websocket": "^11.2.0",
+    "better-sqlite3": "^12.8.0",
+    "dotenv": "^17.3.1",
+    "fastify": "^5.7.4",
+    "ulid": "^3.0.2",
+    "ws": "^8.19.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^25.3.2",
+    "@types/ws": "^8.18.1",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3"
+  }
+}
