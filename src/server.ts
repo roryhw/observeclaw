@@ -17,11 +17,10 @@ import { PulseEngine } from './pulse/engine.js';
 import { evaluateNetworkPolicy, loadNetworkPolicyConfig, type NetworkExcludeReason } from './network/policy.js';
 import { loadPolicy as loadRetentionPolicy, savePolicy as saveRetentionPolicy, retentionPreview, runRetention } from './retention/policy.js';
 
-function loadObserveClawEnvFile() {
+function loadEnvFromFile(filePath: string) {
   try {
-    const envPath = path.join(os.homedir(), '.openclaw', 'observeclaw.env');
-    if (!fs.existsSync(envPath)) return;
-    const lines = fs.readFileSync(envPath, 'utf8').split(/\r?\n/);
+    if (!fs.existsSync(filePath)) return;
+    const lines = fs.readFileSync(filePath, 'utf8').split(/\r?\n/);
     for (const line of lines) {
       const t = line.trim();
       if (!t || t.startsWith('#')) continue;
@@ -34,7 +33,11 @@ function loadObserveClawEnvFile() {
   } catch {}
 }
 
-loadObserveClawEnvFile();
+// Load env files in priority order (first wins per variable):
+// 1. cwd/.env (project directory — standard for cloned repos)
+// 2. ~/.openclaw/observeclaw.env (user-level config)
+loadEnvFromFile(path.join(process.cwd(), '.env'));
+loadEnvFromFile(path.join(os.homedir(), '.openclaw', 'observeclaw.env'));
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -818,9 +821,11 @@ server.addHook('preHandler', async (request: any, reply) => {
   if (PUBLIC_AUTH_ROUTES.has(authPath)) return;
   const shouldAuditAllowedAuth = !(request.method === 'GET' && QUIET_AUTH_ROUTES.has(authPath));
 
+  // No password configured = open mode (no auth required)
   if (!OPERATOR_PASSWORD) {
-    writeAudit('auth.api', request.url, 'misconfigured', { method: request.method }, String(request.ip));
-    return reply.code(503).send({ error: 'ObserveClaw API password is not configured' });
+    request.ocAuthorized = true;
+    request.ocAuthMode = 'open';
+    return;
   }
 
   const provided = String(request.headers['x-observeclaw-password'] || '');
@@ -1542,7 +1547,7 @@ server.get('/api/audit', async (request) => {
 });
 
 server.post('/api/auth/login', async (request: any, reply) => {
-  if (!OPERATOR_PASSWORD) return reply.code(503).send({ error: 'ObserveClaw API password is not configured' });
+  if (!OPERATOR_PASSWORD) return { authorized: true, session: false, mode: 'open' };
   const rawBody = typeof request.body === 'string' ? (() => { try { return JSON.parse(request.body); } catch { return {}; } })() : (request.body || {});
   const provided = String(rawBody?.password || request.headers['x-observeclaw-password'] || '');
   if (!provided || provided !== OPERATOR_PASSWORD) {
@@ -3011,6 +3016,10 @@ cleanupLegacyNetworkRules();
     const host = process.env.OBSERVECLAW_HOST || '0.0.0.0';
     await server.listen({ port, host });
     console.log(`ObserveClaw server listening on ${host}:${port}`);
+    if (!OPERATOR_PASSWORD) {
+      console.warn('⚠️  No OBSERVECLAW_OPERATOR_PASSWORD set — dashboard is running in OPEN mode (no auth).');
+      console.warn('   Set OBSERVECLAW_OPERATOR_PASSWORD in .env or ~/.openclaw/observeclaw.env to enable auth.');
+    }
   } catch (err) {
     server.log.error(err);
     process.exit(1);
