@@ -20,6 +20,7 @@
     "build:ui": "cd ui && npm run build",
     "start": "node dist/server.js",
     "dev": "tsx src/server.ts",
+    "prepare": "npm run build:server",
     "prepack": "npm run build",
     "test": "echo \"Error: no test specified\" && exit 1"
   },

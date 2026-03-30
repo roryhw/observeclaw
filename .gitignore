@@ -1,6 +1,6 @@
 node_modules/
 dist/
-ui/dist/
+# ui/dist/ is tracked — needed for npm git installs
 ui/node_modules/
 *.db
 *.db-journal
