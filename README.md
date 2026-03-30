@@ -25,48 +25,27 @@ Real-time monitoring of your OpenClaw gateway — sessions, model usage, tool in
 
 ## Quick Start
 
-### Install from GitHub
-
 ```bash
-npm install -g github:roryhw/observeclaw
+git clone https://github.com/roryhw/observeclaw.git
+cd observeclaw
+npm install
+node dist/server.js
 ```
 
-### Configure
+Open `http://localhost:3001` in your browser. That's it.
 
-Create a `.env` file in your working directory (or set environment variables):
+By default, ObserveClaw connects to a local OpenClaw gateway (`ws://127.0.0.1:18789`) and runs with no authentication. If you want to password-protect the dashboard or connect to a remote gateway, create a `.env` file:
 
 ```bash
-# Required — point to your OpenClaw gateway
-GATEWAY_URL=ws://127.0.0.1:18789
-
-# Recommended — use your gateway token or password
-GATEWAY_TOKEN=your-token-here
-# or
-GATEWAY_PASSWORD=your-password-here
-
-# Recommended — protect the dashboard
+# Optional — protect the dashboard
 OBSERVECLAW_OPERATOR_PASSWORD=choose-a-password
+
+# Optional — point to a remote OpenClaw gateway
+GATEWAY_URL=ws://your-gateway-ip:18789
+GATEWAY_TOKEN=your-token-here
 ```
 
-If OpenClaw is running on the same machine with default settings, `GATEWAY_URL` can be omitted (defaults to `ws://127.0.0.1:18789`).
-
-### Run
-
-```bash
-observeclaw
-```
-
-Open `http://localhost:3001` in your browser.
-
-### Run with Docker (alternative)
-
-```bash
-docker build -t observeclaw .
-docker run -p 3001:3001 \
-  -e GATEWAY_URL=ws://host.docker.internal:18789 \
-  -e GATEWAY_TOKEN=your-token \
-  observeclaw
-```
+You can also place config in `~/.openclaw/observeclaw.env` for user-level defaults.
 
 ## Configuration
 
