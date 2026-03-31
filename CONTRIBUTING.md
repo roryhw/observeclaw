@@ -70,7 +70,7 @@ Examples:
 Tell them:
 
 ```bash
-cd observeclaw
+cd ~/.openclaw/workspace/observeclaw
 git pull
 npm install       # only if dependencies changed
 node dist/server.js

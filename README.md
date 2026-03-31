@@ -26,13 +26,15 @@ Real-time monitoring of your OpenClaw gateway — sessions, model usage, tool in
 ## Quick Start
 
 ```bash
-git clone https://github.com/roryhw/observeclaw.git
-cd observeclaw
+git clone https://github.com/roryhw/observeclaw.git ~/.openclaw/workspace/observeclaw
+cd ~/.openclaw/workspace/observeclaw
 npm install
 node dist/server.js
 ```
 
 Open `http://localhost:3001` in your browser. That's it.
+
+> **Why `~/.openclaw/workspace/`?** This is the standard OpenClaw workspace directory. Installing here keeps ObserveClaw alongside your other OpenClaw data and ensures the gateway connection works out of the box.
 
 By default, ObserveClaw connects to a local OpenClaw gateway (`ws://127.0.0.1:18789`) and runs with no authentication. If you want to password-protect the dashboard or connect to a remote gateway, create a `.env` file:
 
@@ -66,8 +68,8 @@ All configuration is via environment variables. See [`.env.example`](.env.exampl
 ## Development
 
 ```bash
-git clone https://github.com/roryhw/observeclaw.git
-cd observeclaw
+git clone https://github.com/roryhw/observeclaw.git ~/.openclaw/workspace/observeclaw
+cd ~/.openclaw/workspace/observeclaw
 npm install
 cd ui && npm install && cd ..
 
