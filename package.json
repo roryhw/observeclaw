@@ -1,6 +1,6 @@
 {
   "name": "observeclaw",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "System observability dashboard for OpenClaw",
   "type": "module",
   "bin": {
