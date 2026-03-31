@@ -524,7 +524,7 @@ const glance = ref({
   externalConnections: { today: 0, totalWeek: 0, daily: [] as Array<{ label: string; shortLabel?: string; total: number; destinations: number }>, topConnection: null as null | { label: string; count: number } },
   memory: { used: 0, total: 0, percentUsed: 0 },
   storage: { free: 0, total: 0, used: 0, percentUsed: 0 },
-  uptime: { hostSeconds: 0, openclawSeconds: 0, hostname: '', localIp: '', openclawPid: null as number | null },
+  uptime: { hostSeconds: 0, openclawSeconds: 0, hostname: '', localIp: '', openclawPid: null as number | null, platform: '', arch: '' },
   activity: { daily: [] as Array<{ label: string; shortLabel?: string; toolCalls: number; modelCalls: number; conversationTurns: number; shellCmds: number; fileMutations: number; webResearch: number; browserActions: number }> }
 })
 
@@ -876,7 +876,14 @@ const uptimeParts = (seconds: number) => {
 }
 const uptimeHostParts = computed(() => uptimeParts(glance.value.uptime.hostSeconds))
 const uptimeOcParts = computed(() => uptimeParts(glance.value.uptime.openclawSeconds))
-const hostOsLabel = computed(() => 'macOS')
+const hostOsLabel = computed(() => {
+  const p = (glance.value.uptime.platform || '').toLowerCase()
+  if (p === 'darwin') return 'macOS'
+  if (p === 'linux') return 'Linux'
+  if (p === 'win32') return 'Windows'
+  if (p === 'freebsd') return 'FreeBSD'
+  return p || 'Unknown'
+})
 const hostHostnameLine = computed(() => String(glance.value.uptime.hostname || '').trim())
 const hostIpLine = computed(() => String(glance.value.uptime.localIp || '').trim())
 const openclawPidLine = computed(() => {

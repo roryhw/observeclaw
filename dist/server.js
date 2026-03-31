@@ -1263,7 +1263,9 @@ server.get('/api/glance', async (request) => {
             openclawSeconds: systemStatus.openclawUptime,
             hostname: systemStatus.hostname,
             localIp: systemStatus.localIp,
-            openclawPid: systemStatus.openclawPid
+            openclawPid: systemStatus.openclawPid,
+            platform: os.platform(),
+            arch: os.arch()
         },
         activity: {
             daily: activityDaily
