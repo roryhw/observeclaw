@@ -997,17 +997,24 @@ const getMemoryStatus = () => {
 
 const getOpenClawGatewayProcessInfo = (): { pid: number | null; uptimeSeconds: number } => {
   try {
-    const lines = execSync("ps axo pid=,comm=,lstart=", { encoding: 'utf8', timeout: 2000 }).split('\n');
+    // Use full command line (args) so we can match both the 'openclaw-gateway' binary name
+    // and node processes running openclaw (e.g. 'node /path/to/openclaw gateway start')
+    const psFormat = process.platform === 'linux' ? 'pid=,args=,lstart=' : 'pid=,comm=,lstart=';
+    const lines = execSync(`ps axo ${psFormat}`, { encoding: 'utf8', timeout: 2000 }).split('\n');
     let best: { pid: number | null; uptimeSeconds: number; startedMs: number } | null = null;
     for (const rawLine of lines) {
       const line = String(rawLine || '').trim();
       if (!line) continue;
-      const match = line.match(/^(\d+)\s+(\S+)\s+(.+)$/);
+      const match = line.match(/^(\d+)\s+(\S+(?:\s+\S+)*?)\s{2,}(.+)$/);
       if (!match) continue;
       const pid = Number(match[1]);
-      const comm = String(match[2] || '').trim();
+      const cmdOrArgs = String(match[2] || '').trim();
       const started = new Date(String(match[3] || '').trim());
-      if (comm !== 'openclaw-gateway') continue;
+
+      // Match: binary named 'openclaw-gateway', or any command containing 'openclaw' with 'gateway'
+      const isGateway = cmdOrArgs === 'openclaw-gateway'
+        || (cmdOrArgs.includes('openclaw') && cmdOrArgs.includes('gateway'));
+      if (!isGateway) continue;
       if (!Number.isFinite(pid) || pid <= 0) continue;
       if (isNaN(started.getTime())) {
         if (!best) best = { pid, uptimeSeconds: Math.round(process.uptime()), startedMs: Number.POSITIVE_INFINITY };
