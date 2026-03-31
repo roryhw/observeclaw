@@ -334,20 +334,16 @@
         <div v-else-if="cardId === 'models'" class="oc-card glance-card models-option-card models-matrix-card">
           <div class="card-topline"><h3 class="oc-card-title">MODELS</h3></div>
           <div class="models-table-wrap">
-            <div class="models-table-head">
+            <div class="models-table-head" :style="{ gridTemplateColumns: `minmax(0, 1fr) repeat(${Math.max(1, configSummary.agents.length)}, 42px)` }">
               <div class="models-col-model">MODEL</div>
-              <div class="models-col-agent">DOT</div>
-              <div class="models-col-agent">O2</div>
-              <div class="models-col-agent">SWE</div>
+              <div v-for="agent in configSummary.agents" :key="`head-${agent.id}`" class="models-col-agent">{{ (agent.name || agent.id).toUpperCase() }}</div>
             </div>
-            <div v-for="model in configuredModels" :key="`table-${model.id}`" class="models-table-row">
+            <div v-for="model in configuredModels" :key="`table-${model.id}`" class="models-table-row" :style="{ gridTemplateColumns: `minmax(0, 1fr) repeat(${Math.max(1, configSummary.agents.length)}, 42px)` }">
               <div class="models-col-model">
                 <div class="models-table-name">{{ model.label }}</div>
                 <div class="models-table-sub">{{ [model.alias || model.provider, ...model.chips.filter(c => c === 'DEFAULT' || c === 'HEARTBEAT')].join(' · ') }}</div>
               </div>
-              <div class="models-col-agent"><span class="models-dot" :class="{ active: model.chips.includes('DOT') }"><svg viewBox="0 0 12 12"><circle cx="6" cy="6" r="4" fill="currentColor" /></svg></span></div>
-              <div class="models-col-agent"><span class="models-dot" :class="{ active: model.chips.includes('O2') }"><svg viewBox="0 0 12 12"><circle cx="6" cy="6" r="4" fill="currentColor" /></svg></span></div>
-              <div class="models-col-agent"><span class="models-dot" :class="{ active: model.chips.includes('SWE') }"><svg viewBox="0 0 12 12"><circle cx="6" cy="6" r="4" fill="currentColor" /></svg></span></div>
+              <div v-for="agent in configSummary.agents" :key="`${model.id}-${agent.id}`" class="models-col-agent"><span class="models-dot" :class="{ active: model.agentIds.includes(agent.id) }"><svg viewBox="0 0 12 12"><circle cx="6" cy="6" r="4" fill="currentColor" /></svg></span></div>
             </div>
           </div>
         </div>
@@ -535,6 +531,7 @@ const versionStatusLoading = ref(false)
 const memoryTrend = ref<number[]>([])
 const storageTrend = ref<number[]>([])
 const alertTrend = ref<number[]>([])
+const configSummary = ref<{ agents: Array<{ id: string; name: string }>; models: Array<{ id: string; alias?: string | null; provider?: string; label?: string; agentIds: string[]; flags: string[] }>; skills: string[]; plugins: Array<{ name: string; meta: string; enabled: boolean }> }>({ agents: [], models: [], skills: [], plugins: [] })
 
 const humanizeReason = (r: string) => {
   const m: Record<string, string> = {
@@ -697,6 +694,20 @@ const fetchVersionStatus = async () => {
   } catch {} finally {
     versionStatusLoading.value = false
   }
+}
+
+const fetchConfigSummary = async () => {
+  try {
+    const res = await fetch('/api/system/config-summary', { headers: { 'x-observeclaw-password': authPassword.value || '' } })
+    if (!res.ok) return
+    const json = await res.json()
+    configSummary.value = {
+      agents: Array.isArray(json?.agents) ? json.agents : [],
+      models: Array.isArray(json?.models) ? json.models : [],
+      skills: Array.isArray(json?.skills) ? json.skills : [],
+      plugins: Array.isArray(json?.plugins) ? json.plugins : []
+    }
+  } catch {}
 }
 
 
@@ -892,54 +903,47 @@ const openclawPidLine = computed(() => {
 })
 
 const configuredModels = computed(() => {
-  const models = [
-    { id: 'google/gemini-3-flash-preview', alias: 'gemini-flash', provider: 'Google', label: 'Gemini 3 Flash Preview', chips: ['DEFAULT', 'HEARTBEAT', 'DOT', 'O2'] },
-    { id: 'google/gemini-3.1-pro-preview', alias: 'gemini-pro', provider: 'Google', label: 'Gemini 3.1 Pro Preview', chips: [] },
-    { id: 'openai-codex/gpt-5.4', alias: 'codex', provider: 'OpenAI Codex', label: 'GPT-5.4', chips: [] },
-    { id: 'openai-codex/gpt-5.3-codex', alias: null, provider: 'OpenAI Codex', label: 'GPT-5.3 Codex', chips: ['SWE'] },
-    { id: 'anthropic/claude-opus-4-6', alias: 'opus', provider: 'Anthropic', label: 'Claude Opus 4.6', chips: [] }
-  ]
-  return models.map((m, idx) => ({ ...m, accent: ['cyan', 'violet', 'indigo', 'amber', 'rose'][idx % 5] }))
+  return (configSummary.value.models || []).map((m, idx) => ({
+    ...m,
+    chips: [...(m.flags || []), ...((m.agentIds || []).map((id) => {
+      const agent = (configSummary.value.agents || []).find((a) => a.id === id)
+      return (agent?.name || id).toUpperCase()
+    }))],
+    accent: ['cyan', 'violet', 'indigo', 'amber', 'rose'][idx % 5]
+  }))
 })
 
-const capabilitySkills = [
-  { name: '1password', accent: 'amber' },
-  { name: 'gemini', accent: 'cyan' },
-  { name: 'healthcheck', accent: 'rose' },
-  { name: 'himalaya', accent: 'violet' },
-  { name: 'node-connect', accent: 'indigo' },
-  { name: 'skill-creator', accent: 'cyan' },
-  { name: 'weather', accent: 'amber' }
-]
+const capabilitySkills = computed(() => {
+  return (configSummary.value.skills || []).map((name, idx) => ({
+    name,
+    accent: ['amber', 'cyan', 'rose', 'violet', 'indigo'][idx % 5]
+  }))
+})
 
-const capabilityPlugins = [
-  { name: 'Telegram', meta: 'live', accent: 'cyan' },
-  { name: 'Browser', meta: 'enabled', accent: 'violet' },
-  { name: 'Canvas', meta: 'enabled', accent: 'indigo' },
-  { name: 'Memory', meta: 'enabled', accent: 'amber' },
-  { name: 'Sessions', meta: 'enabled', accent: 'rose' },
-  { name: 'Image/PDF', meta: 'enabled', accent: 'cyan' }
-]
+const capabilityPlugins = computed(() => {
+  return (configSummary.value.plugins || []).map((plugin, idx) => ({
+    ...plugin,
+    accent: ['cyan', 'violet', 'indigo', 'amber', 'rose'][idx % 5]
+  }))
+})
 
 const capabilityDirectoryColumns = ['READ', 'ACT', 'LIVE']
-const capabilitySkillMatrixRows = capabilitySkills.map((skill) => ({
+const capabilitySkillMatrixRows = computed(() => capabilitySkills.value.map((skill) => ({
   ...skill,
-  cols: skill.name === 'weather'
+  cols: skill.name === 'weather' || skill.name === 'skill-creator' || skill.name === '1password' || skill.name === 'himalaya'
     ? ['READ', 'ACT']
-    : skill.name === 'skill-creator'
-      ? ['READ', 'ACT']
-      : ['READ']
-}))
-const capabilityPluginMatrixRows = capabilityPlugins.map((plugin) => ({
+    : ['READ']
+})))
+const capabilityPluginMatrixRows = computed(() => capabilityPlugins.value.map((plugin) => ({
   ...plugin,
   cols: plugin.name === 'Memory'
     ? ['READ', 'LIVE']
-    : plugin.name === 'Sessions'
+    : plugin.name === 'Sessions' || plugin.name === 'Gateway'
       ? ['READ', 'ACT', 'LIVE']
       : plugin.name === 'Telegram'
         ? ['ACT', 'LIVE']
         : ['READ', 'ACT']
-}))
+})))
 
 const relativeTime = (iso: string) => {
   if (!iso) return '—'
@@ -998,6 +1002,7 @@ const fetchCronPreview = async () => {
 const refreshOverview = async () => {
   await fetchGlance()
   void fetchCronPreview()
+  void fetchConfigSummary()
   if (!wsConnected?.value || isDocumentHidden()) await fetchPulse()
 }
 const schedulePolling = () => {
@@ -2592,6 +2597,7 @@ onUnmounted(() => {
   min-height: 240px;
   display: flex;
   flex-direction: column;
+  justify-content: flex-start;
   gap: 12px;
 }
 .models-list-stack,
