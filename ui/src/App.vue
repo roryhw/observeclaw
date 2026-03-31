@@ -13,6 +13,7 @@ const route = useRoute()
 const systemPulseState = ref('IDLE')
 const versionInfo = ref<{ current: string; latest: string | null; status: string } | null>(null)
 const versionInfoLoading = ref(false)
+const hostHostname = ref('')
 
 const currentPageTitle = computed(() => {
   const p = route.path
@@ -105,7 +106,7 @@ const beginAuthorizedSession = async () => {
   connected.value = true
   authError.value = ''
   connectWebSocket()
-  await Promise.allSettled([fetchInitialEvents(), fetchAuthStatus(), fetchPulseSnapshot(), fetchVersionInfo()])
+  await Promise.allSettled([fetchInitialEvents(), fetchAuthStatus(), fetchPulseSnapshot(), fetchVersionInfo(), fetchHostname()])
 }
 
 const login = async () => {
@@ -245,6 +246,15 @@ const fetchVersionInfo = async () => {
   } catch {} finally {
     versionInfoLoading.value = false
   }
+}
+
+const fetchHostname = async () => {
+  try {
+    const res = await fetch('/api/system/status', { credentials: 'same-origin' })
+    if (!res.ok) return
+    const json = await res.json()
+    hostHostname.value = String(json?.hostname || '')
+  } catch {}
 }
 
 const INITIAL_EVENTS_LIMIT = 120
@@ -526,6 +536,10 @@ onUnmounted(() => {
           <span class="nav-active-rail" aria-hidden="true"></span>
         </button>
       </div>
+      <div v-if="hostHostname" class="nav-host-inline">
+        <span class="nav-host-label">HOST</span>
+        <span class="nav-host-value">{{ hostHostname }}</span>
+      </div>
       <div class="nav-version-inline">
         <span class="nav-version-text">{{ versionInfo?.current || 'Unknown' }}</span>
         <span class="status-chip neutral nav-version-chip">{{ navVersionChipText }}</span>
@@ -703,8 +717,32 @@ onUnmounted(() => {
   overflow-y: auto;
   overflow-x: hidden;
 }
-.nav-version-inline {
+.nav-host-inline {
   margin-top: auto;
+  padding: 0 22px 4px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+.nav-host-label {
+  color: rgba(245, 248, 255, 0.35);
+  font-size: 0.58rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.nav-host-value {
+  color: rgba(245, 248, 255, 0.62);
+  font-size: 0.68rem;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 140px;
+}
+.nav-version-inline {
+  margin-top: 0;
   padding: 8px 22px 16px;
   display: flex;
   flex-direction: column;
