@@ -2647,6 +2647,7 @@ onUnmounted(() => {
   gap: 4px;
 }
 .models-matrix-card {
+  justify-content: flex-start !important;
   overflow: hidden;
 }
 .models-table-wrap {
@@ -3383,4 +3384,8 @@ onUnmounted(() => {
   }
 }
 
+
+.capabilities-matrix-review-card {
+  justify-content: flex-start !important;
+}
 </style>

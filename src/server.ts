@@ -310,6 +310,22 @@ function getRuntimeConfigSummary(): any {
 
   ensureModel(defaultModel);
   ensureModel(heartbeatModel);
+
+  // Ensure ALL models from the aliases/models config are registered,
+  // not just those actively assigned to an agent
+  if (aliases && typeof aliases === 'object') {
+    for (const modelKey of Object.keys(aliases)) {
+      ensureModel(modelKey);
+    }
+  }
+
+  // Also pick up the image generation model if configured
+  const imageGenModel = String(config?.agents?.defaults?.imageGenerationModel?.primary || '').trim();
+  if (imageGenModel) {
+    const imgEntry = ensureModel(imageGenModel);
+    if (imgEntry) imgEntry.flags.push('IMAGE_GEN');
+  }
+
   for (const agent of agents) {
     const modelId = String(agent?.model?.primary || defaultModel || '').trim();
     const entry = ensureModel(modelId);
