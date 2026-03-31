@@ -254,6 +254,93 @@ function safeExecJson(cmd: string, timeoutMs = 8000): any {
   }
 }
 
+function safeExecText(cmd: string, timeoutMs = 8000): string {
+  try {
+    return String(execSync(cmd, { encoding: 'utf8', timeout: timeoutMs }) || '');
+  } catch {
+    return '';
+  }
+}
+
+function parseReadySkillsFromCliTable(text: string): string[] {
+  const out = new Set<string>();
+  for (const raw of String(text || '').split('\n')) {
+    const line = String(raw || '');
+    if (!line.includes('│')) continue;
+    if (!line.includes('✓ ready')) continue;
+    const parts = line.split('│').map(s => s.trim()).filter(Boolean);
+    if (parts.length < 2) continue;
+    const skillCell = parts[1] || '';
+    const skillName = skillCell.replace(/^[^a-zA-Z0-9]+/, '').trim();
+    if (skillName) out.add(skillName);
+  }
+  return [...out];
+}
+
+function getRuntimeConfigSummary(): any {
+  const config = readOpenClawConfig();
+  const status = safeExecJson('openclaw status --json', 6000) || {};
+  const agents = Array.isArray(config?.agents?.list) ? config.agents.list : [];
+  const aliases = config?.agents?.defaults?.models || {};
+  const defaultModel = String(config?.agents?.defaults?.model?.primary || '').trim();
+  const heartbeatModel = String(config?.agents?.defaults?.heartbeat?.model || '').trim();
+
+  const modelMap = new Map<string, any>();
+  const ensureModel = (id: string) => {
+    const key = String(id || '').trim();
+    if (!key) return null;
+    if (!modelMap.has(key)) {
+      const alias = aliases?.[key]?.alias ? String(aliases[key].alias) : null;
+      const providerRaw = key.split('/')[0] || '';
+      const provider = providerRaw === 'google' ? 'Google'
+        : providerRaw === 'anthropic' ? 'Anthropic'
+        : providerRaw.startsWith('openai') ? 'OpenAI'
+        : providerRaw || 'Unknown';
+      const short = key.split('/')[1] || key;
+      const label = short
+        .replace(/^gpt-/, 'GPT-')
+        .replace(/^gemini-/, 'Gemini ')
+        .replace(/^claude-/, 'Claude ')
+        .replace(/-/g, ' ')
+        .replace(/\b\w/g, (m) => m.toUpperCase());
+      modelMap.set(key, { id: key, alias, provider, label, agentIds: [] as string[], flags: [] as string[] });
+    }
+    return modelMap.get(key);
+  };
+
+  ensureModel(defaultModel);
+  ensureModel(heartbeatModel);
+  for (const agent of agents) {
+    const modelId = String(agent?.model?.primary || defaultModel || '').trim();
+    const entry = ensureModel(modelId);
+    if (entry && agent?.id) entry.agentIds.push(String(agent.id));
+  }
+  for (const entry of modelMap.values()) {
+    if (entry.id === defaultModel) entry.flags.push('DEFAULT');
+    if (entry.id === heartbeatModel) entry.flags.push('HEARTBEAT');
+  }
+
+  const skillsText = safeExecText('openclaw skills list', 10000);
+  const readySkills = parseReadySkillsFromCliTable(skillsText);
+
+  const channels = config?.channels || {};
+  const plugins: Array<{ name: string; meta: string; enabled: boolean }> = [];
+  if (channels?.telegram?.enabled) plugins.push({ name: 'Telegram', meta: 'configured', enabled: true });
+  if (status?.memoryPlugin?.enabled) plugins.push({ name: 'Memory', meta: 'enabled', enabled: true });
+  if ((status?.agents?.agents || []).length > 0) plugins.push({ name: 'Sessions', meta: `${(status?.agents?.agents || []).length} agents`, enabled: true });
+  if (status?.gateway?.reachable) plugins.push({ name: 'Gateway', meta: 'reachable', enabled: true });
+  if (fs.existsSync(path.join(OPENCLAW_HOME, 'browser'))) plugins.push({ name: 'Browser', meta: 'available', enabled: true });
+  if (fs.existsSync(path.join(OPENCLAW_HOME, 'canvas'))) plugins.push({ name: 'Canvas', meta: 'available', enabled: true });
+  if (config?.agents?.defaults?.imageModel || config?.agents?.defaults?.imageGenerationModel) plugins.push({ name: 'Image/PDF', meta: 'configured', enabled: true });
+
+  return {
+    agents: agents.map((a: any) => ({ id: String(a.id || ''), name: String(a.name || a.id || '') })),
+    models: [...modelMap.values()],
+    skills: readySkills,
+    plugins
+  };
+}
+
 function detectCapabilities(files: string[]): string[] {
   const caps: string[] = [];
   if (files.includes('SKILL.md')) caps.push('Skill');
@@ -1104,6 +1191,10 @@ server.get('/api/system/status', async () => {
 
 server.get('/api/openclaw/version-status', async () => {
   return await getPersistedOpenClawVersionStatus();
+});
+
+server.get('/api/system/config-summary', async () => {
+  return getRuntimeConfigSummary();
 });
 
 server.get('/api/glance', async (request: any) => {
