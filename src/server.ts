@@ -2317,14 +2317,15 @@ server.register(async function (fastify) {
     const provided = headerPass || queryPass;
     const cookieAllowed = requestHasValidSessionCookie({ headers: req.headers });
     const passwordAllowed = !!OPERATOR_PASSWORD && !!provided && provided === OPERATOR_PASSWORD;
-    const wsAllowed = cookieAllowed || passwordAllowed;
+    const openMode = !OPERATOR_PASSWORD;
+    const wsAllowed = openMode || cookieAllowed || passwordAllowed;
     if (!wsAllowed) {
       writeAudit('auth.ws', '/ws', 'denied', { reason: 'bad-session-or-password' }, String(req.socket.remoteAddress || 'unknown'));
       connection.close();
       return;
     }
 
-    writeAudit('auth.ws', '/ws', 'allowed', { mode: cookieAllowed ? 'session' : 'header' }, String(req.socket.remoteAddress || 'unknown'));
+    writeAudit('auth.ws', '/ws', 'allowed', { mode: openMode ? 'open' : cookieAllowed ? 'session' : 'header' }, String(req.socket.remoteAddress || 'unknown'));
     eventBus.clients.add(connection);
 
     try {
