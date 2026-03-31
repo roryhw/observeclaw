@@ -952,6 +952,24 @@ const getOpenClawVersion = (() => {
   };
 })();
 
+const getObserveClawVersion = (() => {
+  let cached = '';
+  let fetchedAt = 0;
+  return () => {
+    const now = Date.now();
+    if (cached && now - fetchedAt < 60 * 1000) return cached;
+    try {
+      const pkgPath = path.join(__dirname, '..', 'package.json');
+      const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
+      cached = String(pkg?.version || '').trim() || 'Unknown';
+      fetchedAt = now;
+      return cached;
+    } catch {
+      return cached || 'Unknown';
+    }
+  };
+})();
+
 const extractVersionNumber = (input: string) => {
   const match = String(input || '').match(/(\d+\.\d+\.\d+)/);
   return match?.[1] || null;
@@ -1195,6 +1213,14 @@ server.get('/api/openclaw/version-status', async () => {
 
 server.get('/api/system/config-summary', async () => {
   return getRuntimeConfigSummary();
+});
+
+server.get('/api/system/sidebar-meta', async () => {
+  return {
+    hostname: os.hostname(),
+    observeclawVersion: getObserveClawVersion(),
+    openclawVersion: getOpenClawVersion()
+  };
 });
 
 server.get('/api/glance', async (request: any) => {

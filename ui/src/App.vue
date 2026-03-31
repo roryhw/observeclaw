@@ -13,7 +13,7 @@ const route = useRoute()
 const systemPulseState = ref('IDLE')
 const versionInfo = ref<{ current: string; latest: string | null; status: string } | null>(null)
 const versionInfoLoading = ref(false)
-const hostHostname = ref('')
+const sidebarMeta = ref<{ hostname: string; observeclawVersion: string; openclawVersion: string }>({ hostname: '', observeclawVersion: '', openclawVersion: '' })
 
 const currentPageTitle = computed(() => {
   const p = route.path
@@ -106,7 +106,7 @@ const beginAuthorizedSession = async () => {
   connected.value = true
   authError.value = ''
   connectWebSocket()
-  await Promise.allSettled([fetchInitialEvents(), fetchAuthStatus(), fetchPulseSnapshot(), fetchVersionInfo(), fetchHostname()])
+  await Promise.allSettled([fetchInitialEvents(), fetchAuthStatus(), fetchPulseSnapshot(), fetchVersionInfo(), fetchSidebarMeta()])
 }
 
 const login = async () => {
@@ -248,12 +248,16 @@ const fetchVersionInfo = async () => {
   }
 }
 
-const fetchHostname = async () => {
+const fetchSidebarMeta = async () => {
   try {
-    const res = await fetch('/api/system/status', { credentials: 'same-origin' })
+    const res = await fetch('/api/system/sidebar-meta', { credentials: 'same-origin' })
     if (!res.ok) return
     const json = await res.json()
-    hostHostname.value = String(json?.hostname || '')
+    sidebarMeta.value = {
+      hostname: String(json?.hostname || ''),
+      observeclawVersion: String(json?.observeclawVersion || ''),
+      openclawVersion: String(json?.openclawVersion || '')
+    }
   } catch {}
 }
 
@@ -536,12 +540,16 @@ onUnmounted(() => {
           <span class="nav-active-rail" aria-hidden="true"></span>
         </button>
       </div>
-      <div v-if="hostHostname" class="nav-host-inline">
+      <div v-if="sidebarMeta.hostname" class="nav-host-inline">
         <span class="nav-host-label">HOST</span>
-        <span class="nav-host-value">{{ hostHostname }}</span>
+        <span class="nav-host-value">{{ sidebarMeta.hostname }}</span>
+      </div>
+      <div v-if="sidebarMeta.observeclawVersion" class="nav-host-inline nav-version-meta-inline">
+        <span class="nav-host-label">VERSION</span>
+        <span class="nav-host-value">{{ sidebarMeta.observeclawVersion }}</span>
       </div>
       <div class="nav-version-inline">
-        <span class="nav-version-text">{{ versionInfo?.current || 'Unknown' }}</span>
+        <span class="nav-version-text">{{ versionInfo?.current || sidebarMeta.openclawVersion || 'Unknown' }}</span>
         <span class="status-chip neutral nav-version-chip">{{ navVersionChipText }}</span>
       </div>
     </nav>
@@ -740,6 +748,9 @@ onUnmounted(() => {
   text-overflow: ellipsis;
   white-space: nowrap;
   max-width: 140px;
+}
+.nav-version-meta-inline {
+  padding-top: 0;
 }
 .nav-version-inline {
   margin-top: 0;
