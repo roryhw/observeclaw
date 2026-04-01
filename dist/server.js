@@ -7,7 +7,9 @@ import fs from 'fs';
 import os from 'os';
 import { fileURLToPath } from 'url';
 import { ulid } from 'ulid';
-import { execSync } from 'child_process';
+import { execSync, execFile as execFileCb } from 'child_process';
+import { promisify } from 'util';
+const execFileAsync = promisify(execFileCb);
 import crypto from 'crypto';
 import net from 'net';
 import { db, initDB } from './db/index.js';
@@ -439,7 +441,7 @@ let canUseLsof = null;
 let canUseSs = null;
 const NETWORK_SCOPE = String(process.env.OBSERVECLAW_NETWORK_SCOPE || 'openclaw').toLowerCase();
 const NETWORK_SCOPE_REFRESH_MS = Number(process.env.OBSERVECLAW_NETWORK_SCOPE_REFRESH_MS || '30000');
-const NETWORK_CONNECTION_SAMPLE_MS = Number(process.env.OBSERVECLAW_NETWORK_CONNECTION_SAMPLE_MS || '60000');
+const NETWORK_CONNECTION_SAMPLE_MS = Number(process.env.OBSERVECLAW_NETWORK_CONNECTION_SAMPLE_MS || (process.platform === 'linux' ? '120000' : '60000'));
 const PULSE_SYNC_MS = Number(process.env.OBSERVECLAW_PULSE_SYNC_MS || '5000');
 const RETENTION_CRON_POLL_MS = Number(process.env.OBSERVECLAW_RETENTION_CRON_POLL_MS || '15000');
 const NETWORK_POLICY = loadNetworkPolicyConfig(process.env);
@@ -600,9 +602,9 @@ function parseHostPort(raw) {
         return null;
     return { host, port };
 }
-function getListeningPortsByPidLsof() {
+async function getListeningPortsByPidLsof() {
     const out = new Map();
-    const raw = execSync('lsof -n -P -iTCP -sTCP:LISTEN', { encoding: 'utf8', timeout: 5000 });
+    const { stdout: raw } = await execFileAsync('lsof', ['-n', '-P', '-iTCP', '-sTCP:LISTEN'], { encoding: 'utf8', timeout: 8000 });
     const lines = raw.split('\n').slice(1).filter(Boolean);
     for (const line of lines) {
         const parts = line.trim().split(/\s+/);
@@ -621,18 +623,17 @@ function getListeningPortsByPidLsof() {
     }
     return out;
 }
-function getListeningPortsByPidSs() {
+async function getListeningPortsByPidSs() {
     const out = new Map();
-    // ss -tlnp outputs: State Recv-Q Send-Q Local Address:Port Peer Address:Port Process
-    const raw = execSync('ss -tlnp', { encoding: 'utf8', timeout: 5000 });
+    const useProcessFlag = process.platform !== 'linux' || trackedNetworkPids.size < 500;
+    const args = useProcessFlag ? ['-tlnp'] : ['-tln'];
+    const { stdout: raw } = await execFileAsync('ss', args, { encoding: 'utf8', timeout: 8000 });
     const lines = raw.split('\n').slice(1).filter(Boolean);
     for (const line of lines) {
-        // Extract pid from users:(("node",pid=1234,...)) pattern
         const pidMatch = line.match(/pid=(\d+)/);
-        if (!pidMatch)
+        if (!pidMatch && useProcessFlag)
             continue;
-        const pid = Number(pidMatch[1]);
-        // Extract local address:port — 4th column
+        const pid = pidMatch ? Number(pidMatch[1]) : 0;
         const parts = line.trim().split(/\s+/);
         if (parts.length < 4)
             continue;
@@ -641,28 +642,29 @@ function getListeningPortsByPidSs() {
         if (!portMatch)
             continue;
         const port = Number(portMatch[1]);
-        if (!Number.isFinite(pid) || pid <= 0 || !Number.isFinite(port) || port <= 0)
+        if (!Number.isFinite(port) || port <= 0)
             continue;
-        if (!out.has(pid))
-            out.set(pid, new Set());
-        out.get(pid).add(port);
+        if (pid > 0) {
+            if (!out.has(pid))
+                out.set(pid, new Set());
+            out.get(pid).add(port);
+        }
     }
     return out;
 }
-function getListeningPortsByPid() {
+async function getListeningPortsByPid() {
     try {
         if (canUseLsof === true || (canUseLsof === null && process.platform === 'darwin')) {
-            return getListeningPortsByPidLsof();
+            return await getListeningPortsByPidLsof();
         }
         if (canUseSs === true) {
-            return getListeningPortsByPidSs();
+            return await getListeningPortsByPidSs();
         }
-        // Try lsof first, fall back to ss
         try {
-            return getListeningPortsByPidLsof();
+            return await getListeningPortsByPidLsof();
         }
         catch {
-            return getListeningPortsByPidSs();
+            return await getListeningPortsByPidSs();
         }
     }
     catch {
@@ -700,11 +702,11 @@ function isPublicHost(host) {
     }
     return true; // hostname/FQDN assumed external
 }
-function refreshTrackedNetworkPids() {
+async function refreshTrackedNetworkPids() {
     if (NETWORK_SCOPE !== 'openclaw')
         return;
     try {
-        const out = execSync('ps -axo pid=,ppid=,command=', { encoding: 'utf8', timeout: 5000 });
+        const { stdout: out } = await execFileAsync('ps', ['-axo', 'pid=,ppid=,command='], { encoding: 'utf8', timeout: 8000 });
         const rows = out.split('\n').map((line) => line.trim()).filter(Boolean).map((line) => {
             const m = line.match(/^(\d+)\s+(\d+)\s+(.+)$/);
             if (!m)
@@ -712,7 +714,6 @@ function refreshTrackedNetworkPids() {
             return { pid: Number(m[1]), ppid: Number(m[2]), cmd: m[3] };
         }).filter(Boolean);
         const roots = new Set([process.pid]);
-        // Keep root matching strict to avoid pulling in unrelated apps that merely reference ~/.openclaw paths.
         const rootRe = /(openclaw-gateway|workspace\/observeclaw\/src\/server\.ts|workspace\/echo|\/echo-ai\b|\becho\s+ai\b)/i;
         for (const r of rows) {
             if (rootRe.test(r.cmd || ''))
@@ -782,8 +783,8 @@ function detectNetworkTools() {
         writeAudit('network.sample', 'init', 'warning', { error: 'Neither lsof nor ss available; relying on inferred network events' }, 'system');
     }
 }
-function getEstablishedConnectionsLsof() {
-    const out = execSync('lsof -n -P -iTCP -sTCP:ESTABLISHED', { encoding: 'utf8', timeout: 5000 });
+async function getEstablishedConnectionsLsof() {
+    const { stdout: out } = await execFileAsync('lsof', ['-n', '-P', '-iTCP', '-sTCP:ESTABLISHED'], { encoding: 'utf8', timeout: 8000 });
     const lines = out.split('\n').slice(1).filter(Boolean);
     const results = [];
     for (const line of lines) {
@@ -804,16 +805,16 @@ function getEstablishedConnectionsLsof() {
     }
     return results;
 }
-function getEstablishedConnectionsSs() {
-    // ss -tnp outputs: State Recv-Q Send-Q Local Address:Port Peer Address:Port Process
-    const out = execSync('ss -tnpH', { encoding: 'utf8', timeout: 5000 });
+async function getEstablishedConnectionsSs() {
+    const useProcessFlag = process.platform !== 'linux' || trackedNetworkPids.size < 500;
+    const args = useProcessFlag ? ['-tnpH'] : ['-tnH'];
+    const { stdout: out } = await execFileAsync('ss', args, { encoding: 'utf8', timeout: 8000 });
     const lines = out.split('\n').filter(Boolean);
     const results = [];
     for (const line of lines) {
         if (!line.includes('ESTAB'))
             continue;
         const parts = line.trim().split(/\s+/);
-        // ESTAB recv-q send-q local peer process
         if (parts.length < 5)
             continue;
         const localAddr = parts[3] || '';
@@ -823,33 +824,37 @@ function getEstablishedConnectionsSs() {
         const remote = parseHostPort(peerAddr);
         if (!local || !remote)
             continue;
-        // Extract pid and command from users:(("node",pid=1234,fd=15))
         const pidMatch = processInfo.match(/pid=(\d+)/);
         const cmdMatch = processInfo.match(/\("([^"]+)"/);
         const pid = pidMatch ? Number(pidMatch[1]) : 0;
         const command = cmdMatch?.[1] ?? 'unknown';
-        if (pid <= 0)
+        if (!useProcessFlag || pid <= 0) {
+            // Without -p flag, we can't get PID directly; skip non-matchable
+            if (useProcessFlag)
+                continue;
+            results.push({ command: 'unknown', pid: 0, local, remote });
             continue;
+        }
         results.push({ command, pid, local, remote });
     }
     return results;
 }
-function getEstablishedConnections() {
+async function getEstablishedConnections() {
     if (canUseLsof)
-        return getEstablishedConnectionsLsof();
+        return await getEstablishedConnectionsLsof();
     if (canUseSs)
-        return getEstablishedConnectionsSs();
+        return await getEstablishedConnectionsSs();
     return [];
 }
-function sampleNetworkConnections() {
+async function sampleNetworkConnections() {
     try {
         detectNetworkTools();
         if (!canUseLsof && !canUseSs)
             return;
         if (NETWORK_SCOPE === 'openclaw' && trackedNetworkPids.size === 0)
             return;
-        const listeningPortsByPid = getListeningPortsByPid();
-        const connections = getEstablishedConnections();
+        const listeningPortsByPid = await getListeningPortsByPid();
+        const connections = await getEstablishedConnections();
         const now = Date.now();
         for (const conn of connections) {
             const { command, pid: pidNum, local, remote } = conn;
