@@ -630,14 +630,12 @@ async function getListeningPortsByPidLsof(): Promise<Map<number, Set<number>>> {
 
 async function getListeningPortsByPidSs(): Promise<Map<number, Set<number>>> {
   const out = new Map<number, Set<number>>();
-  const useProcessFlag = process.platform !== 'linux' || trackedNetworkPids.size < 500;
-  const args = useProcessFlag ? ['-tlnp'] : ['-tln'];
+  // On Linux, NEVER use -p flag — it forces full /proc/*/fd/ traversal causing dcache lock contention
+  const isLinux = process.platform === 'linux';
+  const args = isLinux ? ['-tln'] : ['-tlnp'];
   const { stdout: raw } = await execFileAsync('ss', args, { encoding: 'utf8', timeout: 8000 });
   const lines = raw.split('\n').slice(1).filter(Boolean);
   for (const line of lines) {
-    const pidMatch = line.match(/pid=(\d+)/);
-    if (!pidMatch && useProcessFlag) continue;
-    const pid = pidMatch ? Number(pidMatch[1]) : 0;
     const parts = line.trim().split(/\s+/);
     if (parts.length < 4) continue;
     const localAddr = parts[3] || '';
@@ -645,9 +643,19 @@ async function getListeningPortsByPidSs(): Promise<Map<number, Set<number>>> {
     if (!portMatch) continue;
     const port = Number(portMatch[1]);
     if (!Number.isFinite(port) || port <= 0) continue;
-    if (pid > 0) {
-      if (!out.has(pid)) out.set(pid, new Set<number>());
-      out.get(pid)!.add(port);
+    if (!isLinux) {
+      // Non-Linux: extract PID from process info
+      const pidMatch = line.match(/pid=(\d+)/);
+      if (!pidMatch) continue;
+      const pid = Number(pidMatch[1]);
+      if (pid > 0) {
+        if (!out.has(pid)) out.set(pid, new Set<number>());
+        out.get(pid)!.add(port);
+      }
+    } else {
+      // Linux: store port with pid=0 — PID resolution happens via tracked port matching
+      if (!out.has(0)) out.set(0, new Set<number>());
+      out.get(0)!.add(port);
     }
   }
   return out;
@@ -655,6 +663,12 @@ async function getListeningPortsByPidSs(): Promise<Map<number, Set<number>>> {
 
 async function getListeningPortsByPid(): Promise<Map<number, Set<number>>> {
   try {
+    if (process.platform === 'linux') {
+      // Linux: ONLY use ss without -p to avoid /proc traversal
+      if (canUseSs !== false) return await getListeningPortsByPidSs();
+      return new Map();
+    }
+    // macOS/other: lsof is safe (uses Mach APIs, no /proc contention)
     if (canUseLsof === true || (canUseLsof === null && process.platform === 'darwin')) {
       return await getListeningPortsByPidLsof();
     }
@@ -798,8 +812,9 @@ async function getEstablishedConnectionsLsof(): Promise<ParsedConnection[]> {
 }
 
 async function getEstablishedConnectionsSs(): Promise<ParsedConnection[]> {
-  const useProcessFlag = process.platform !== 'linux' || trackedNetworkPids.size < 500;
-  const args = useProcessFlag ? ['-tnpH'] : ['-tnH'];
+  // On Linux, NEVER use -p flag — it forces full /proc/*/fd/ traversal causing dcache lock contention
+  const isLinux = process.platform === 'linux';
+  const args = isLinux ? ['-tnH'] : ['-tnpH'];
   const { stdout: out } = await execFileAsync('ss', args, { encoding: 'utf8', timeout: 8000 });
   const lines = out.split('\n').filter(Boolean);
   const results: ParsedConnection[] = [];
@@ -809,26 +824,32 @@ async function getEstablishedConnectionsSs(): Promise<ParsedConnection[]> {
     if (parts.length < 5) continue;
     const localAddr = parts[3] || '';
     const peerAddr = parts[4] || '';
-    const processInfo = parts.slice(5).join(' ');
     const local = parseHostPort(localAddr);
     const remote = parseHostPort(peerAddr);
     if (!local || !remote) continue;
-    const pidMatch = processInfo.match(/pid=(\d+)/);
-    const cmdMatch = processInfo.match(/\("([^"]+)"/);
-    const pid = pidMatch ? Number(pidMatch[1]) : 0;
-    const command = cmdMatch?.[1] ?? 'unknown';
-    if (!useProcessFlag || pid <= 0) {
-      // Without -p flag, we can't get PID directly; skip non-matchable
-      if (useProcessFlag) continue;
+    if (isLinux) {
+      // No PID info available — will be inferred via port matching in sampleNetworkConnections
       results.push({ command: 'unknown', pid: 0, local, remote });
-      continue;
+    } else {
+      const processInfo = parts.slice(5).join(' ');
+      const pidMatch = processInfo.match(/pid=(\d+)/);
+      const cmdMatch = processInfo.match(/\("([^"]+)"/);
+      const pid = pidMatch ? Number(pidMatch[1]) : 0;
+      const command = cmdMatch?.[1] ?? 'unknown';
+      if (pid <= 0) continue;
+      results.push({ command, pid, local, remote });
     }
-    results.push({ command, pid, local, remote });
   }
   return results;
 }
 
 async function getEstablishedConnections(): Promise<ParsedConnection[]> {
+  if (process.platform === 'linux') {
+    // Linux: ONLY use ss without -p to avoid /proc traversal
+    if (canUseSs !== false) return await getEstablishedConnectionsSs();
+    return [];
+  }
+  // macOS/other: lsof is safe
   if (canUseLsof) return await getEstablishedConnectionsLsof();
   if (canUseSs) return await getEstablishedConnectionsSs();
   return [];
@@ -844,16 +865,48 @@ async function sampleNetworkConnections() {
     const connections = await getEstablishedConnections();
     const now = Date.now();
 
+    // Build a reverse map: port → pid set (for Linux port-based inference)
+    const portToPids = new Map<number, Set<number>>();
+    for (const [pid, ports] of listeningPortsByPid) {
+      for (const port of ports) {
+        if (!portToPids.has(port)) portToPids.set(port, new Set<number>());
+        portToPids.get(port)!.add(pid);
+      }
+    }
+
+    // Build set of all listening ports owned by tracked PIDs (for Linux port-based scope filtering)
+    const trackedListeningPorts = new Set<number>();
+    if (process.platform === 'linux' && NETWORK_SCOPE === 'openclaw') {
+      for (const pid of trackedNetworkPids) {
+        const ports = listeningPortsByPid.get(pid);
+        if (ports) for (const p of ports) trackedListeningPorts.add(p);
+      }
+      // On Linux without -p, also include all known listening ports (pid=0 bucket)
+      const unknownPorts = listeningPortsByPid.get(0);
+      if (unknownPorts) for (const p of unknownPorts) trackedListeningPorts.add(p);
+    }
+
     for (const conn of connections) {
       const { command, pid: pidNum, local, remote } = conn;
       if (NETWORK_SCOPE === 'openclaw') {
-        if (!Number.isFinite(pidNum) || !trackedNetworkPids.has(pidNum)) continue;
-        // Narrow to OpenClaw service/runtime processes; exclude browser/system helpers.
-        if (!/(openclaw-gateway|^node$|^openclaw$|echo)/i.test(command)) continue;
+        if (process.platform === 'linux') {
+          // Linux: no PID from ss, so infer ownership via port matching
+          // A connection belongs to us if its local port matches a tracked listening port,
+          // or if it originates from our known service ports
+          const isTrackedInbound = trackedListeningPorts.has(local.port);
+          const isTrackedOutbound = trackedListeningPorts.has(local.port) || trackedNetworkPids.size > 0;
+          if (!isTrackedInbound && !isTrackedOutbound) continue;
+        } else {
+          if (!Number.isFinite(pidNum) || !trackedNetworkPids.has(pidNum)) continue;
+          // Narrow to OpenClaw service/runtime processes; exclude browser/system helpers.
+          if (!/(openclaw-gateway|^node$|^openclaw$|echo)/i.test(command)) continue;
+        }
       }
 
-      const listenSet = listeningPortsByPid.get(pidNum);
-      const inferredDirection: 'outbound' | 'inbound' = listenSet?.has(local.port) ? 'inbound' : 'outbound';
+      const listenSet = pidNum > 0 ? listeningPortsByPid.get(pidNum) : null;
+      // On Linux (pid=0), check all listening ports for direction inference
+      const allListenPorts = process.platform === 'linux' ? (listeningPortsByPid.get(0) || new Set()) : new Set<number>();
+      const inferredDirection: 'outbound' | 'inbound' = (listenSet?.has(local.port) || allListenPorts.has(local.port)) ? 'inbound' : 'outbound';
       if (inferredDirection === 'inbound' && !NETWORK_POLICY.logIncoming) continue;
 
       const policy = evaluateNetworkPolicy(NETWORK_POLICY, inferredDirection, remote.host);
