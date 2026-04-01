@@ -7,9 +7,7 @@ import fs from 'fs';
 import os from 'os';
 import { fileURLToPath } from 'url';
 import { ulid } from 'ulid';
-import { execSync, execFile as execFileCb } from 'child_process';
-import { promisify } from 'util';
-const execFileAsync = promisify(execFileCb);
+import { execSync } from 'child_process';
 import crypto from 'crypto';
 import net from 'net';
 import { db, initDB } from './db/index.js';
@@ -436,16 +434,9 @@ function writeAudit(action, target, status, details, actor) {
         // no-op
     }
 }
-const networkSeen = new Map();
-let canUseLsof = null;
-let canUseSs = null;
-const NETWORK_SCOPE = String(process.env.OBSERVECLAW_NETWORK_SCOPE || 'openclaw').toLowerCase();
-const NETWORK_SCOPE_REFRESH_MS = Number(process.env.OBSERVECLAW_NETWORK_SCOPE_REFRESH_MS || '30000');
-const NETWORK_CONNECTION_SAMPLE_MS = Number(process.env.OBSERVECLAW_NETWORK_CONNECTION_SAMPLE_MS || (process.platform === 'linux' ? '120000' : '60000'));
 const PULSE_SYNC_MS = Number(process.env.OBSERVECLAW_PULSE_SYNC_MS || '5000');
 const RETENTION_CRON_POLL_MS = Number(process.env.OBSERVECLAW_RETENTION_CRON_POLL_MS || '15000');
 const NETWORK_POLICY = loadNetworkPolicyConfig(process.env);
-const trackedNetworkPids = new Set();
 const networkPolicyDrops = new Map();
 const pulseEngine = new PulseEngine({
     staleWarnMs: 10_000,
@@ -602,93 +593,6 @@ function parseHostPort(raw) {
         return null;
     return { host, port };
 }
-async function getListeningPortsByPidLsof() {
-    const out = new Map();
-    const { stdout: raw } = await execFileAsync('lsof', ['-n', '-P', '-iTCP', '-sTCP:LISTEN'], { encoding: 'utf8', timeout: 8000 });
-    const lines = raw.split('\n').slice(1).filter(Boolean);
-    for (const line of lines) {
-        const parts = line.trim().split(/\s+/);
-        if (parts.length < 9)
-            continue;
-        const pid = Number(parts[1] || 0);
-        if (!Number.isFinite(pid) || pid <= 0)
-            continue;
-        const name = parts.slice(8).join(' ');
-        const hp = parseHostPort(name.split('->')[0] || name);
-        if (!hp)
-            continue;
-        if (!out.has(pid))
-            out.set(pid, new Set());
-        out.get(pid).add(hp.port);
-    }
-    return out;
-}
-async function getListeningPortsByPidSs() {
-    const out = new Map();
-    // On Linux, NEVER use -p flag — it forces full /proc/*/fd/ traversal causing dcache lock contention
-    const isLinux = process.platform === 'linux';
-    const args = isLinux ? ['-tln'] : ['-tlnp'];
-    const { stdout: raw } = await execFileAsync('ss', args, { encoding: 'utf8', timeout: 8000 });
-    const lines = raw.split('\n').slice(1).filter(Boolean);
-    for (const line of lines) {
-        const parts = line.trim().split(/\s+/);
-        if (parts.length < 4)
-            continue;
-        const localAddr = parts[3] || '';
-        const portMatch = localAddr.match(/:(\d+)$/);
-        if (!portMatch)
-            continue;
-        const port = Number(portMatch[1]);
-        if (!Number.isFinite(port) || port <= 0)
-            continue;
-        if (!isLinux) {
-            // Non-Linux: extract PID from process info
-            const pidMatch = line.match(/pid=(\d+)/);
-            if (!pidMatch)
-                continue;
-            const pid = Number(pidMatch[1]);
-            if (pid > 0) {
-                if (!out.has(pid))
-                    out.set(pid, new Set());
-                out.get(pid).add(port);
-            }
-        }
-        else {
-            // Linux: store port with pid=0 — PID resolution happens via tracked port matching
-            if (!out.has(0))
-                out.set(0, new Set());
-            out.get(0).add(port);
-        }
-    }
-    return out;
-}
-async function getListeningPortsByPid() {
-    try {
-        if (process.platform === 'linux') {
-            // Linux: ONLY use ss without -p to avoid /proc traversal
-            if (canUseSs !== false)
-                return await getListeningPortsByPidSs();
-            return new Map();
-        }
-        // macOS/other: lsof is safe (uses Mach APIs, no /proc contention)
-        if (canUseLsof === true || (canUseLsof === null && process.platform === 'darwin')) {
-            return await getListeningPortsByPidLsof();
-        }
-        if (canUseSs === true) {
-            return await getListeningPortsByPidSs();
-        }
-        try {
-            return await getListeningPortsByPidLsof();
-        }
-        catch {
-            return await getListeningPortsByPidSs();
-        }
-    }
-    catch {
-        // best effort
-    }
-    return new Map();
-}
 function isPublicHost(host) {
     const h = normalizeHost(host);
     if (!h)
@@ -718,271 +622,6 @@ function isPublicHost(host) {
         return true;
     }
     return true; // hostname/FQDN assumed external
-}
-async function refreshTrackedNetworkPids() {
-    if (NETWORK_SCOPE !== 'openclaw')
-        return;
-    try {
-        const { stdout: out } = await execFileAsync('ps', ['-axo', 'pid=,ppid=,command='], { encoding: 'utf8', timeout: 8000 });
-        const rows = out.split('\n').map((line) => line.trim()).filter(Boolean).map((line) => {
-            const m = line.match(/^(\d+)\s+(\d+)\s+(.+)$/);
-            if (!m)
-                return null;
-            return { pid: Number(m[1]), ppid: Number(m[2]), cmd: m[3] };
-        }).filter(Boolean);
-        const roots = new Set([process.pid]);
-        const rootRe = /(openclaw-gateway|workspace\/observeclaw\/src\/server\.ts|workspace\/echo|\/echo-ai\b|\becho\s+ai\b)/i;
-        for (const r of rows) {
-            if (rootRe.test(r.cmd || ''))
-                roots.add(r.pid);
-        }
-        const children = new Map();
-        for (const r of rows) {
-            if (!children.has(r.ppid))
-                children.set(r.ppid, []);
-            children.get(r.ppid).push(r.pid);
-        }
-        const seen = new Set();
-        const stack = Array.from(roots);
-        while (stack.length) {
-            const pid = stack.pop();
-            if (seen.has(pid))
-                continue;
-            seen.add(pid);
-            const kids = children.get(pid) || [];
-            for (const k of kids)
-                stack.push(k);
-        }
-        trackedNetworkPids.clear();
-        for (const p of seen)
-            trackedNetworkPids.add(p);
-    }
-    catch { }
-}
-function emitNetworkEvent(evt) {
-    const id = ulid();
-    const ts = new Date().toISOString();
-    db.prepare(`
-    INSERT INTO normalized_events (id, rawEventId, timestamp, domain, type, severity, agentId, sessionKey, channel, summary, data)
-    VALUES (?, NULL, ?, 'network', ?, ?, ?, ?, ?, ?, ?)
-  `).run(id, ts, evt.type || 'network.connect', evt.severity || 'info', evt.agentId || null, evt.sessionKey || null, null, evt.summary || 'Network connection observed', JSON.stringify(evt));
-    eventBus.broadcast({
-        id,
-        timestamp: ts,
-        domain: 'network',
-        type: evt.type || 'network.connect',
-        severity: evt.severity || 'info',
-        agentId: evt.agentId || null,
-        sessionKey: evt.sessionKey || null,
-        channel: null,
-        summary: evt.summary || 'Network connection observed',
-        data: JSON.stringify(evt)
-    });
-}
-function detectNetworkTools() {
-    if (canUseLsof !== null || canUseSs !== null)
-        return;
-    try {
-        execSync('command -v lsof', { stdio: 'ignore' });
-        canUseLsof = true;
-    }
-    catch {
-        canUseLsof = false;
-    }
-    try {
-        execSync('command -v ss', { stdio: 'ignore' });
-        canUseSs = true;
-    }
-    catch {
-        canUseSs = false;
-    }
-    if (!canUseLsof && !canUseSs) {
-        writeAudit('network.sample', 'init', 'warning', { error: 'Neither lsof nor ss available; relying on inferred network events' }, 'system');
-    }
-}
-async function getEstablishedConnectionsLsof() {
-    const { stdout: out } = await execFileAsync('lsof', ['-n', '-P', '-iTCP', '-sTCP:ESTABLISHED'], { encoding: 'utf8', timeout: 8000 });
-    const lines = out.split('\n').slice(1).filter(Boolean);
-    const results = [];
-    for (const line of lines) {
-        const parts = line.trim().split(/\s+/);
-        if (parts.length < 9)
-            continue;
-        const command = parts[0] || '';
-        const pid = Number(parts[1] || 0);
-        const name = parts.slice(8).join(' ');
-        const m = name.match(/(.+)->(.+)/);
-        if (!m)
-            continue;
-        const local = parseHostPort(m[1] || '');
-        const remote = parseHostPort(m[2] || '');
-        if (!local || !remote)
-            continue;
-        results.push({ command, pid, local, remote });
-    }
-    return results;
-}
-async function getEstablishedConnectionsSs() {
-    // On Linux, NEVER use -p flag — it forces full /proc/*/fd/ traversal causing dcache lock contention
-    const isLinux = process.platform === 'linux';
-    const args = isLinux ? ['-tnH'] : ['-tnpH'];
-    const { stdout: out } = await execFileAsync('ss', args, { encoding: 'utf8', timeout: 8000 });
-    const lines = out.split('\n').filter(Boolean);
-    const results = [];
-    for (const line of lines) {
-        if (!line.includes('ESTAB'))
-            continue;
-        const parts = line.trim().split(/\s+/);
-        if (parts.length < 5)
-            continue;
-        const localAddr = parts[3] || '';
-        const peerAddr = parts[4] || '';
-        const local = parseHostPort(localAddr);
-        const remote = parseHostPort(peerAddr);
-        if (!local || !remote)
-            continue;
-        if (isLinux) {
-            // No PID info available — will be inferred via port matching in sampleNetworkConnections
-            results.push({ command: 'unknown', pid: 0, local, remote });
-        }
-        else {
-            const processInfo = parts.slice(5).join(' ');
-            const pidMatch = processInfo.match(/pid=(\d+)/);
-            const cmdMatch = processInfo.match(/\("([^"]+)"/);
-            const pid = pidMatch ? Number(pidMatch[1]) : 0;
-            const command = cmdMatch?.[1] ?? 'unknown';
-            if (pid <= 0)
-                continue;
-            results.push({ command, pid, local, remote });
-        }
-    }
-    return results;
-}
-async function getEstablishedConnections() {
-    if (process.platform === 'linux') {
-        // Linux: ONLY use ss without -p to avoid /proc traversal
-        if (canUseSs !== false)
-            return await getEstablishedConnectionsSs();
-        return [];
-    }
-    // macOS/other: lsof is safe
-    if (canUseLsof)
-        return await getEstablishedConnectionsLsof();
-    if (canUseSs)
-        return await getEstablishedConnectionsSs();
-    return [];
-}
-async function sampleNetworkConnections() {
-    try {
-        detectNetworkTools();
-        if (!canUseLsof && !canUseSs)
-            return;
-        if (NETWORK_SCOPE === 'openclaw' && trackedNetworkPids.size === 0)
-            return;
-        const listeningPortsByPid = await getListeningPortsByPid();
-        const connections = await getEstablishedConnections();
-        const now = Date.now();
-        // Build a reverse map: port → pid set (for Linux port-based inference)
-        const portToPids = new Map();
-        for (const [pid, ports] of listeningPortsByPid) {
-            for (const port of ports) {
-                if (!portToPids.has(port))
-                    portToPids.set(port, new Set());
-                portToPids.get(port).add(pid);
-            }
-        }
-        // Build set of all listening ports owned by tracked PIDs (for Linux port-based scope filtering)
-        const trackedListeningPorts = new Set();
-        if (process.platform === 'linux' && NETWORK_SCOPE === 'openclaw') {
-            for (const pid of trackedNetworkPids) {
-                const ports = listeningPortsByPid.get(pid);
-                if (ports)
-                    for (const p of ports)
-                        trackedListeningPorts.add(p);
-            }
-            // On Linux without -p, also include all known listening ports (pid=0 bucket)
-            const unknownPorts = listeningPortsByPid.get(0);
-            if (unknownPorts)
-                for (const p of unknownPorts)
-                    trackedListeningPorts.add(p);
-        }
-        for (const conn of connections) {
-            const { command, pid: pidNum, local, remote } = conn;
-            if (NETWORK_SCOPE === 'openclaw') {
-                if (process.platform === 'linux') {
-                    // Linux: no PID from ss, so infer ownership via port matching
-                    // A connection belongs to us if its local port matches a tracked listening port,
-                    // or if it originates from our known service ports
-                    const isTrackedInbound = trackedListeningPorts.has(local.port);
-                    const isTrackedOutbound = trackedListeningPorts.has(local.port) || trackedNetworkPids.size > 0;
-                    if (!isTrackedInbound && !isTrackedOutbound)
-                        continue;
-                }
-                else {
-                    if (!Number.isFinite(pidNum) || !trackedNetworkPids.has(pidNum))
-                        continue;
-                    // Narrow to OpenClaw service/runtime processes; exclude browser/system helpers.
-                    if (!/(openclaw-gateway|^node$|^openclaw$|echo)/i.test(command))
-                        continue;
-                }
-            }
-            const listenSet = pidNum > 0 ? listeningPortsByPid.get(pidNum) : null;
-            // On Linux (pid=0), check all listening ports for direction inference
-            const allListenPorts = process.platform === 'linux' ? (listeningPortsByPid.get(0) || new Set()) : new Set();
-            const inferredDirection = (listenSet?.has(local.port) || allListenPorts.has(local.port)) ? 'inbound' : 'outbound';
-            if (inferredDirection === 'inbound' && !NETWORK_POLICY.logIncoming)
-                continue;
-            const policy = evaluateNetworkPolicy(NETWORK_POLICY, inferredDirection, remote.host);
-            if (!policy.allow && policy.reason) {
-                bumpNetworkPolicyDrop(policy.reason);
-                continue;
-            }
-            const eventType = inferredDirection === 'inbound' ? 'network.inbound' : 'network.connect';
-            const key = `${eventType}:${pidNum}:${remote.host}:${remote.port}`;
-            const last = networkSeen.get(key) || 0;
-            const dedupeMs = eventType === 'network.connect' ? 300000 : 120000;
-            if (now - last < dedupeMs)
-                continue;
-            networkSeen.set(key, now);
-            const remoteIp = net.isIP(remote.host) ? remote.host : null;
-            emitNetworkEvent({
-                type: eventType,
-                severity: 'info',
-                process: command,
-                pid: pidNum,
-                direction: inferredDirection,
-                host: remote.host,
-                port: remote.port,
-                localHost: local.host,
-                localPort: local.port,
-                remoteHost: remote.host,
-                remotePort: remote.port,
-                remoteIp,
-                resolvedIp: remoteIp,
-                source: 'socket-observed',
-                sourceType: 'socket-observed',
-                inferred: true,
-                commandClass: 'socket-flow',
-                attributionConfidence: remoteIp ? 'medium' : 'low',
-                protocol: 'tcp',
-                isPublic: isPublicHost(remote.host),
-                excludedByPolicy: 0,
-                excludeReason: null,
-                policyVersion: 1,
-                summary: inferredDirection === 'inbound'
-                    ? `${command} accepted inbound from ${remote.host}:${remote.port}`
-                    : `${command} connected to ${remote.host}:${remote.port}`
-            });
-        }
-        // cleanup stale dedupe entries
-        for (const [k, t] of networkSeen.entries()) {
-            if (now - t > 30 * 60 * 1000)
-                networkSeen.delete(k);
-        }
-    }
-    catch (err) {
-        writeAudit('network.sample', 'network', 'error', { error: String(err?.message || err) }, 'system');
-    }
 }
 const QUIET_AUTH_ROUTES = new Set([
     '/api/pulse',
@@ -3233,14 +2872,10 @@ const start = async () => {
         runRetentionSweep('startup');
         evaluateRules();
         await processNotificationOutbox();
-        refreshTrackedNetworkPids();
-        sampleNetworkConnections();
         setInterval(() => { void runJobIfIdle('evaluateRules', () => evaluateRules()); }, 30 * 1000); // every 30s
         setInterval(() => { void runJobIfIdle('processNotificationOutbox', () => processNotificationOutbox()); }, 10 * 1000); // every 10s
         setInterval(() => { void runJobIfIdle('syncPulseFromDatabase', () => syncPulseFromDatabase()); }, PULSE_SYNC_MS); // incremental pulse sync from ingested events
         setInterval(() => { void runJobIfIdle('pollRetentionCronTriggers', () => pollRetentionCronTriggers()); }, RETENTION_CRON_POLL_MS); // incremental retention trigger polling
-        setInterval(() => { void runJobIfIdle('refreshTrackedNetworkPids', () => refreshTrackedNetworkPids()); }, Math.max(10000, NETWORK_SCOPE_REFRESH_MS));
-        setInterval(() => { void runJobIfIdle('sampleNetworkConnections', () => sampleNetworkConnections()); }, NETWORK_CONNECTION_SAMPLE_MS); // adaptive network sampling
         setInterval(() => { pulseEngine.tick(); }, 1000); // pulse decay/staleness tick
         connectToGateway();
         if (!telegramNotifierConfigured()) {
