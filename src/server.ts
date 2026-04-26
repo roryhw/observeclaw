@@ -7,7 +7,10 @@ import fs from 'fs';
 import os from 'os';
 import { fileURLToPath } from 'url';
 import { ulid } from 'ulid';
-import { execSync } from 'child_process';
+import { execSync, execFile } from 'child_process';
+import { promisify } from 'util';
+
+const execFileAsync = promisify(execFile);
 import crypto from 'crypto';
 import net from 'net';
 import { db, initDB } from './db/index.js';
@@ -245,6 +248,77 @@ function readOpenClawConfig(): any {
   }
 }
 
+// --- Async exec helpers (non-blocking replacements for execSync) ---
+
+async function asyncExecJson(cmd: string, timeoutMs = 8000): Promise<any> {
+  try {
+    const parts = cmd.split(/\s+/);
+    const { stdout } = await execFileAsync(parts[0]!, parts.slice(1), {
+      encoding: 'utf8',
+      timeout: timeoutMs,
+      maxBuffer: 8 * 1024 * 1024
+    });
+    return JSON.parse(stdout);
+  } catch {
+    return null;
+  }
+}
+
+async function asyncExecText(cmd: string, timeoutMs = 8000): Promise<string> {
+  try {
+    const parts = cmd.split(/\s+/);
+    const { stdout } = await execFileAsync(parts[0]!, parts.slice(1), {
+      encoding: 'utf8',
+      timeout: timeoutMs,
+      maxBuffer: 8 * 1024 * 1024
+    });
+    return String(stdout || '');
+  } catch {
+    return '';
+  }
+}
+
+// Shared cache for expensive async subprocess results.
+// Deduplicates concurrent requests for the same command.
+const _asyncCache = new Map<string, { data: any; ts: number; inflight?: Promise<any> }>();
+
+async function cachedAsyncExecJson(cmd: string, cacheSec: number, timeoutMs = 8000): Promise<any> {
+  const entry = _asyncCache.get(cmd);
+  const now = Date.now();
+  if (entry && now - entry.ts < cacheSec * 1000) return entry.data;
+  // Deduplicate: if an identical request is already in flight, wait for it
+  if (entry?.inflight) return entry.inflight;
+  const promise = asyncExecJson(cmd, timeoutMs).then((result) => {
+    _asyncCache.set(cmd, { data: result, ts: Date.now() });
+    return result;
+  }).catch(() => {
+    // On failure, keep stale cache if available
+    const stale = _asyncCache.get(cmd);
+    if (stale) { delete stale.inflight; }
+    return entry?.data ?? null;
+  });
+  _asyncCache.set(cmd, { data: entry?.data ?? null, ts: entry?.ts ?? 0, inflight: promise });
+  return promise;
+}
+
+async function cachedAsyncExecText(cmd: string, cacheSec: number, timeoutMs = 8000): Promise<string> {
+  const entry = _asyncCache.get(cmd);
+  const now = Date.now();
+  if (entry && now - entry.ts < cacheSec * 1000) return entry.data;
+  if (entry?.inflight) return entry.inflight;
+  const promise = asyncExecText(cmd, timeoutMs).then((result) => {
+    _asyncCache.set(cmd, { data: result, ts: Date.now() });
+    return result;
+  }).catch(() => {
+    const stale = _asyncCache.get(cmd);
+    if (stale) { delete stale.inflight; }
+    return entry?.data ?? '';
+  });
+  _asyncCache.set(cmd, { data: entry?.data ?? '', ts: entry?.ts ?? 0, inflight: promise });
+  return promise;
+}
+
+// Legacy sync helpers — only used by user-triggered mutation endpoints (cron toggle/run/edit)
 function safeExecJson(cmd: string, timeoutMs = 8000): any {
   try {
     const out = execSync(cmd, { encoding: 'utf8', timeout: timeoutMs });
@@ -277,9 +351,9 @@ function parseReadySkillsFromCliTable(text: string): string[] {
   return [...out];
 }
 
-function getRuntimeConfigSummary(): any {
+async function getRuntimeConfigSummary(): Promise<any> {
   const config = readOpenClawConfig();
-  const status = safeExecJson('openclaw status --json', 6000) || {};
+  const status = (await cachedAsyncExecJson('openclaw status --json', 30, 6000)) || {};
   const agents = Array.isArray(config?.agents?.list) ? config.agents.list : [];
   const aliases = config?.agents?.defaults?.models || {};
   const defaultModel = String(config?.agents?.defaults?.model?.primary || '').trim();
@@ -336,7 +410,7 @@ function getRuntimeConfigSummary(): any {
     if (entry.id === heartbeatModel) entry.flags.push('HEARTBEAT');
   }
 
-  const skillsText = safeExecText('openclaw skills list', 10000);
+  const skillsText = await cachedAsyncExecText('openclaw skills list', 60, 10000);
   const readySkills = parseReadySkillsFromCliTable(skillsText);
 
   const channels = config?.channels || {};
@@ -366,7 +440,7 @@ function detectCapabilities(files: string[]): string[] {
   return caps;
 }
 
-function analyzeProject(projectPath: string): any {
+async function analyzeProject(projectPath: string): Promise<any> {
   const info: any = {
     name: path.basename(projectPath),
     path: projectPath,
@@ -389,7 +463,7 @@ function analyzeProject(projectPath: string): any {
       } catch {}
     }
 
-    const status = safeExecJson('openclaw status --json', 6000);
+    const status = await cachedAsyncExecJson('openclaw status --json', 30, 6000);
     const statusText = JSON.stringify(status || {});
     if (statusText.includes(path.basename(projectPath))) info.isRunning = true;
   } catch {}
@@ -678,11 +752,12 @@ server.get('/health', async (request, reply) => {
 const getOpenClawVersion = (() => {
   let cached = '';
   let fetchedAt = 0;
-  return () => {
+  return async (): Promise<string> => {
     const now = Date.now();
     if (cached && now - fetchedAt < 5 * 60 * 1000) return cached;
     try {
-      cached = String(execSync('openclaw --version', { encoding: 'utf8', timeout: 5000 }) || '').trim();
+      const { stdout } = await execFileAsync('openclaw', ['--version'], { encoding: 'utf8', timeout: 5000 });
+      cached = String(stdout || '').trim();
       fetchedAt = now;
       return cached;
     } catch {
@@ -746,7 +821,7 @@ async function fetchLatestOpenClawVersion() {
 }
 
 async function getPersistedOpenClawVersionStatus() {
-  const installedDisplay = getOpenClawVersion();
+  const installedDisplay = await getOpenClawVersion();
   const installedVersion = extractVersionNumber(installedDisplay) || installedDisplay || 'Unknown';
   const checkDate = todayLocalDate();
   const existing = db.prepare('SELECT * FROM version_checks WHERE checkDate = ?').get(checkDate) as any;
@@ -839,12 +914,13 @@ const getMemoryStatus = () => {
   return { free, total, used, percentUsed: total > 0 ? Math.round((used / total) * 100) : 0 };
 };
 
-const getOpenClawGatewayProcessInfo = (): { pid: number | null; uptimeSeconds: number } => {
+const getOpenClawGatewayProcessInfo = async (): Promise<{ pid: number | null; uptimeSeconds: number }> => {
   try {
     // Use full command line (args) so we can match both the 'openclaw-gateway' binary name
     // and node processes running openclaw (e.g. 'node /path/to/openclaw gateway start')
     const psFormat = process.platform === 'linux' ? 'pid=,args=,lstart=' : 'pid=,comm=,lstart=';
-    const lines = execSync(`ps axo ${psFormat}`, { encoding: 'utf8', timeout: 2000 }).split('\n');
+    const { stdout } = await execFileAsync('ps', ['axo', psFormat], { encoding: 'utf8', timeout: 2000 });
+    const lines = stdout.split('\n');
     let best: { pid: number | null; uptimeSeconds: number; startedMs: number } | null = null;
     for (const rawLine of lines) {
       const line = String(rawLine || '').trim();
@@ -875,7 +951,7 @@ const getOpenClawGatewayProcessInfo = (): { pid: number | null; uptimeSeconds: n
   return { pid: null, uptimeSeconds: Math.round(process.uptime()) };
 };
 
-const getOpenClawGatewayUptime = (): number => getOpenClawGatewayProcessInfo().uptimeSeconds;
+const getOpenClawGatewayUptime = async (): Promise<number> => (await getOpenClawGatewayProcessInfo()).uptimeSeconds;
 
 const getPrimaryLocalIp = (): string | null => {
   try {
@@ -927,13 +1003,13 @@ const getStorageStatus = () => {
 server.get('/api/system/status', async () => {
   const load = os.loadavg();
   const uptime = os.uptime();
-  const gateway = getOpenClawGatewayProcessInfo();
+  const gateway = await getOpenClawGatewayProcessInfo();
   return {
     authorized: true,
     telegramNotifierConfigured: telegramNotifierConfigured(),
     memory: getMemoryStatus(),
     storage: getStorageStatus(),
-    openclawVersion: getOpenClawVersion(),
+    openclawVersion: await getOpenClawVersion(),
     openclawUptime: gateway.uptimeSeconds,
     openclawPid: gateway.pid,
     hostname: os.hostname(),
@@ -951,14 +1027,14 @@ server.get('/api/openclaw/version-status', async () => {
 });
 
 server.get('/api/system/config-summary', async () => {
-  return getRuntimeConfigSummary();
+  return await getRuntimeConfigSummary();
 });
 
 server.get('/api/system/sidebar-meta', async () => {
   return {
     hostname: os.hostname(),
     observeclawVersion: getObserveClawVersion(),
-    openclawVersion: getOpenClawVersion()
+    openclawVersion: await getOpenClawVersion()
   };
 });
 
@@ -985,7 +1061,7 @@ server.get('/api/glance', async (request: any) => {
     LIMIT 3
   `).all() as any[];
 
-  const cronData = safeExecJson('openclaw cron list --json --all', 8000);
+  const cronData = await cachedAsyncExecJson('openclaw cron list --json --all', 15, 8000);
   const cronJobs = Array.isArray(cronData?.jobs) ? cronData.jobs : [];
   const cronEnabled = cronJobs.filter((job: any) => !!job?.enabled).length;
   const enabledCronJobs = cronJobs.filter((job: any) => !!job?.enabled);
@@ -1082,14 +1158,14 @@ server.get('/api/glance', async (request: any) => {
     };
   });
 
-  const gateway = getOpenClawGatewayProcessInfo();
+  const gateway = await getOpenClawGatewayProcessInfo();
   const systemStatus = {
     memory: getMemoryStatus(),
     storage: getStorageStatus(),
     hostUptime: Math.round(os.uptime()),
     openclawUptime: gateway.uptimeSeconds,
     openclawPid: gateway.pid,
-    openclawVersion: getOpenClawVersion(),
+    openclawVersion: await getOpenClawVersion(),
     hostname: os.hostname(),
     localIp: getPrimaryLocalIp()
   };
@@ -1510,14 +1586,14 @@ server.post('/api/retention/schedule', async (request: any, reply) => {
   const tz = String(request.body?.timezone || policy.timezone || 'America/Los_Angeles').trim();
 
   try {
-    const list = safeExecJson('openclaw cron list --json --all', 8000);
+    const list = await asyncExecJson('openclaw cron list --json --all', 8000);
     const jobs = list?.jobs || [];
     const existing = jobs.find((j: any) => String(j?.name || '') === 'observeclaw-retention');
 
     if (existing?.id) {
-      execSync(`openclaw cron edit ${JSON.stringify(String(existing.id))} --name observeclaw-retention --cron ${JSON.stringify(cronExpr)} --tz ${JSON.stringify(tz)} --system-event ${JSON.stringify('OBSERVECLAW_RETENTION_RUN')}`, { encoding: 'utf8', timeout: 10000 });
+      await execFileAsync('openclaw', ['cron', 'edit', String(existing.id), '--name', 'observeclaw-retention', '--cron', cronExpr, '--tz', tz, '--system-event', 'OBSERVECLAW_RETENTION_RUN'], { encoding: 'utf8', timeout: 10000 });
     } else {
-      execSync(`openclaw cron add --name observeclaw-retention --cron ${JSON.stringify(cronExpr)} --tz ${JSON.stringify(tz)} --system-event ${JSON.stringify('OBSERVECLAW_RETENTION_RUN')}`, { encoding: 'utf8', timeout: 10000 });
+      await execFileAsync('openclaw', ['cron', 'add', '--name', 'observeclaw-retention', '--cron', cronExpr, '--tz', tz, '--system-event', 'OBSERVECLAW_RETENTION_RUN'], { encoding: 'utf8', timeout: 10000 });
     }
 
     const updated = saveRetentionPolicy(db, { scheduleCron: cronExpr, timezone: tz });
@@ -1540,7 +1616,7 @@ server.get('/api/agents', async (request) => {
 });
 
 server.get('/api/workspaces/cron', async (request: any) => {
-  const data = safeExecJson('openclaw cron list --json --all', 8000);
+  const data = await cachedAsyncExecJson('openclaw cron list --json --all', 15, 8000);
   const jobs = (data?.jobs || []).map((job: any) => ({
     id: job.id,
     name: job.name || String(job.id || '').slice(0, 8),
@@ -1565,8 +1641,7 @@ server.post('/api/workspaces/cron/:id/toggle', async (request: any, reply) => {
   const id = String(request.params?.id || '');
   const enabled = !!request.body?.enabled;
   try {
-    const cmd = `openclaw cron ${enabled ? 'enable' : 'disable'} ${JSON.stringify(id)}`;
-    execSync(cmd, { encoding: 'utf8', timeout: 7000 });
+    await execFileAsync('openclaw', ['cron', enabled ? 'enable' : 'disable', id], { encoding: 'utf8', timeout: 7000 });
     writeAudit('write.workspaces.cron.toggle', '/api/workspaces/cron/:id/toggle', 'ok', { id, enabled }, String(request.ip));
     return { ok: true };
   } catch (err: any) {
@@ -1578,7 +1653,7 @@ server.post('/api/workspaces/cron/:id/toggle', async (request: any, reply) => {
 server.post('/api/workspaces/cron/:id/run', async (request: any, reply) => {
   const id = String(request.params?.id || '');
   try {
-    execSync(`openclaw cron run ${JSON.stringify(id)}`, { encoding: 'utf8', timeout: 12000 });
+    await execFileAsync('openclaw', ['cron', 'run', id], { encoding: 'utf8', timeout: 12000 });
     writeAudit('write.workspaces.cron.run', '/api/workspaces/cron/:id/run', 'ok', { id }, String(request.ip));
     return { ok: true };
   } catch (err: any) {
@@ -1589,7 +1664,7 @@ server.post('/api/workspaces/cron/:id/run', async (request: any, reply) => {
 
 server.get('/api/workspaces/projects', async (request: any) => {
   const workspaceRoots = getWorkspaceRoots();
-  const cronData = safeExecJson('openclaw cron list --json --all', 8000);
+  const cronData = await cachedAsyncExecJson('openclaw cron list --json --all', 15, 8000);
   const cronJobs = cronData?.jobs || [];
   const projects: any[] = [];
 
@@ -1611,7 +1686,7 @@ server.get('/api/workspaces/projects', async (request: any) => {
           const hasCode = files.some((f) => ['package.json', 'server.js', 'index.js', 'main.js', 'SKILL.md'].includes(f) || f.endsWith('.py'));
           if (!hasCode) continue;
 
-          const info = analyzeProject(pth);
+          const info = await analyzeProject(pth);
           info.workspaceName = workspaceName;
 
           const pthName = path.basename(pth);
